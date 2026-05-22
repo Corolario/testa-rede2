@@ -31,6 +31,7 @@ SERVIDORES=(
 
 PING_COUNT=10               # pacotes ICMP por teste de ping
 IPERF_TIME=10               # duração de cada teste do iperf3 (segundos)
+IPERF_PARALELO=4            # conexões TCP simultâneas no iperf3 (-P)
 IPERF_CONNECT_TIMEOUT=5000  # ms para o handshake de controle do iperf3
 PAUSA_ENTRE_DIRECOES=2      # segundos entre download e upload — evita
                             # "Connection reset by peer" enquanto o
@@ -96,8 +97,11 @@ parse_ping() {
 parse_iperf() {
     local f="$1" taxa="FALHOU"
     if [[ -f "$f" ]]; then
+        # Com -P > 1, iperf3 emite uma linha [SUM] ... receiver com o total
+        # agregado. Com stream único, só há [N] receiver. Prefere SUM.
         local linha_res
-        linha_res="$(grep -E 'receiver' "$f" | tail -1)"
+        linha_res="$(grep -E '\[SUM\].*receiver' "$f" | tail -1)"
+        [[ -z "$linha_res" ]] && linha_res="$(grep -E 'receiver' "$f" | tail -1)"
         if [[ -n "$linha_res" ]]; then
             taxa="$(echo "$linha_res" | awk '{for(i=1;i<=NF;i++) if($i ~ /bits\/sec/){print $(i-1)" "$i; exit}}')"
             [[ -z "$taxa" ]] && taxa="FALHOU"
@@ -128,7 +132,7 @@ testa_ping() {
 }
 
 testa_iperf() {
-    cabecalho "TESTE DE IPERF3 ( ${IPERF_TIME}s por direção )"
+    cabecalho "TESTE DE IPERF3 ( ${IPERF_TIME}s por direção, ${IPERF_PARALELO} conexões paralelas )"
     for entrada in "${SERVIDORES[@]}"; do
         local host="${entrada%%:*}"
         local porta="${entrada##*:}"
@@ -140,7 +144,7 @@ testa_iperf() {
         echo "   --- Download (servidor -> cliente) ---"
         secao "iperf ${host}:${porta} download"
         iperf3 -c "$host" -p "$porta" -t "$IPERF_TIME" -R \
-               --connect-timeout "$IPERF_CONNECT_TIMEOUT" 2>&1 \
+               -P "$IPERF_PARALELO" --connect-timeout "$IPERF_CONNECT_TIMEOUT" 2>&1 \
                | tee -a "$COMPLETO_LOG" "$tmp_dl" \
             || echo -e "${C_ERRO}   [FALHA] no download com ${host}:${porta}${C_RESET}"
         echo
@@ -150,7 +154,7 @@ testa_iperf() {
         echo "   --- Upload (cliente -> servidor) ---"
         secao "iperf ${host}:${porta} upload"
         iperf3 -c "$host" -p "$porta" -t "$IPERF_TIME" \
-               --connect-timeout "$IPERF_CONNECT_TIMEOUT" 2>&1 \
+               -P "$IPERF_PARALELO" --connect-timeout "$IPERF_CONNECT_TIMEOUT" 2>&1 \
                | tee -a "$COMPLETO_LOG" "$tmp_ul" \
             || echo -e "${C_ERRO}   [FALHA] no upload com ${host}:${porta}${C_RESET}"
         echo
