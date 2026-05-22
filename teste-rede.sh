@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 #
 # teste-rede.sh - Testa conectividade (ping) e largura de banda (iperf3)
-#                 contra uma lista de servidores, salva os resultados em
-#                 arquivos e exibe um resumo final.
+#                 contra uma lista de servidores e gera dois arquivos de log.
 #
 # Uso:
-#   ./teste-rede.sh            # roda todos os testes (ping + iperf3 download e upload)
+#   ./teste-rede.sh            # ping + iperf3 (download e upload)
 #   ./teste-rede.sh -p         # somente ping
 #   ./teste-rede.sh -i         # somente iperf3
 #   ./teste-rede.sh -h         # ajuda
@@ -15,18 +14,14 @@
 #   Fedora:        sudo dnf install iperf3 iputils
 #   Arch:          sudo pacman -S iperf3 iputils
 #
-# Os resultados são gravados em um diretório:
-#   resultados-rede_AAAAMMDD_HHMMSS/
-#       ping_<host>.log              -> saída bruta de cada ping
-#       iperf_<host>_download.log    -> saída bruta do iperf3 (download)
-#       iperf_<host>_upload.log      -> saída bruta do iperf3 (upload)
-#       resumo.txt                   -> tabela-resumo legível
-#       completo.log                 -> tudo concatenado
+# Saída (em resultados-rede_AAAAMMDD_HHMMSS/):
+#   resumo.txt    -> tabela-resumo legível
+#   completo.log  -> saída bruta de todos os testes + resumo, na ordem
 
 set -uo pipefail
 
 # ----------------------------------------------------------------------
-# Servidores: "host:porta"  (a porta é usada apenas pelo iperf3)
+# Configuração
 # ----------------------------------------------------------------------
 SERVIDORES=(
     "148.230.60.200:30000"
@@ -34,21 +29,18 @@ SERVIDORES=(
     "138.199.4.1:5201"
 )
 
-PING_COUNT=10            # pacotes ICMP por teste de ping
-IPERF_TIME=10            # duração de cada teste do iperf3 (segundos)
+PING_COUNT=10               # pacotes ICMP por teste de ping
+IPERF_TIME=10               # duração de cada teste do iperf3 (segundos)
 IPERF_CONNECT_TIMEOUT=5000  # ms para o handshake de controle do iperf3
-PAUSA_ENTRE_DIRECOES=2   # segundos entre download e upload (evita "Connection reset"
-                         # quando o iperf3-server ainda está finalizando a sessão anterior)
+PAUSA_ENTRE_DIRECOES=2      # segundos entre download e upload — evita
+                            # "Connection reset by peer" enquanto o
+                            # iperf3-server ainda finaliza a sessão anterior
 
-# ----------------------------------------------------------------------
-# Diretório de resultados
-# ----------------------------------------------------------------------
 CARIMBO="$(date '+%Y%m%d_%H%M%S')"
 RESULT_DIR="resultados-rede_${CARIMBO}"
 RESUMO_TXT="${RESULT_DIR}/resumo.txt"
 COMPLETO_LOG="${RESULT_DIR}/completo.log"
 
-# Arrays que acumulam os dados para o resumo final
 declare -a PING_RESUMO=()    # "host|perda|rtt_medio"
 declare -a IPERF_RESUMO=()   # "host|porta|download|upload"
 
@@ -63,10 +55,10 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# Funções auxiliares
+# Auxiliares
 # ----------------------------------------------------------------------
-linha()    { printf '%s\n' "----------------------------------------------------------------------"; }
-cabecalho(){ echo; linha; echo -e "${C_TITULO}$1${C_RESET}"; linha; }
+linha()     { printf '%s\n' "----------------------------------------------------------------------"; }
+cabecalho() { echo; linha; echo -e "${C_TITULO}$1${C_RESET}"; linha; }
 
 verifica_dependencias() {
     local faltando=()
@@ -79,10 +71,17 @@ verifica_dependencias() {
     fi
 }
 
+# Anota um cabeçalho de seção no completo.log
+secao() {
+    {
+        echo
+        echo "########## $1 ##########"
+    } >> "$COMPLETO_LOG"
+}
+
 # ----------------------------------------------------------------------
-# Parsers para o resumo
+# Parsers (recebem caminho de arquivo com a saída do comando)
 # ----------------------------------------------------------------------
-# Extrai "perda% rtt_medio_ms" de um arquivo de ping. Campos ausentes viram "?".
 parse_ping() {
     local f="$1" perda="?" rtt="?"
     if [[ -f "$f" ]]; then
@@ -94,7 +93,6 @@ parse_ping() {
     echo "${perda}|${rtt}"
 }
 
-# Extrai a taxa (ex.: "944 Mbits/sec") da linha de resumo "receiver" do iperf3.
 parse_iperf() {
     local f="$1" taxa="FALHOU"
     if [[ -f "$f" ]]; then
@@ -109,69 +107,64 @@ parse_iperf() {
 }
 
 # ----------------------------------------------------------------------
-# Teste de PING
+# Testes
 # ----------------------------------------------------------------------
 testa_ping() {
     cabecalho "TESTE DE PING ( ${PING_COUNT} pacotes por servidor )"
     for entrada in "${SERVIDORES[@]}"; do
         local host="${entrada%%:*}"
-        local arq="${RESULT_DIR}/ping_${host}.log"
+        local tmp; tmp="$(mktemp)"
         echo -e "${C_INFO}>> Ping em ${host}${C_RESET}"
-        if ping -c "$PING_COUNT" -W 2 "$host" 2>&1 | tee "$arq"; then
+        secao "ping ${host}"
+        if ping -c "$PING_COUNT" -W 2 "$host" 2>&1 | tee -a "$COMPLETO_LOG" "$tmp"; then
             echo -e "${C_OK}   [OK] ${host} respondeu.${C_RESET}"
         else
             echo -e "${C_ERRO}   [FALHA] ${host} não respondeu.${C_RESET}"
         fi
-        local dados; dados="$(parse_ping "$arq")"
-        PING_RESUMO+=("${host}|${dados}")
+        PING_RESUMO+=("${host}|$(parse_ping "$tmp")")
+        rm -f "$tmp"
         echo
     done
 }
 
-# ----------------------------------------------------------------------
-# Teste de IPERF3
-# ----------------------------------------------------------------------
 testa_iperf() {
     cabecalho "TESTE DE IPERF3 ( ${IPERF_TIME}s por direção )"
     for entrada in "${SERVIDORES[@]}"; do
         local host="${entrada%%:*}"
         local porta="${entrada##*:}"
-        local arq_dl="${RESULT_DIR}/iperf_${host}_download.log"
-        local arq_ul="${RESULT_DIR}/iperf_${host}_upload.log"
+        local tmp_dl tmp_ul
+        tmp_dl="$(mktemp)"; tmp_ul="$(mktemp)"
 
         echo -e "${C_INFO}>> Servidor ${host} (porta ${porta})${C_RESET}"
 
         echo "   --- Download (servidor -> cliente) ---"
+        secao "iperf ${host}:${porta} download"
         iperf3 -c "$host" -p "$porta" -t "$IPERF_TIME" -R \
-               --connect-timeout "$IPERF_CONNECT_TIMEOUT" 2>&1 | tee "$arq_dl" \
+               --connect-timeout "$IPERF_CONNECT_TIMEOUT" 2>&1 \
+               | tee -a "$COMPLETO_LOG" "$tmp_dl" \
             || echo -e "${C_ERRO}   [FALHA] no download com ${host}:${porta}${C_RESET}"
         echo
 
-        # Aguarda o iperf3-server liberar a sessão anterior antes do upload.
-        # Sem essa pausa, o handshake do upload é recusado com
-        # "Connection reset by peer" porque o servidor (single client por
-        # padrão) ainda está em teardown do teste de download.
         sleep "$PAUSA_ENTRE_DIRECOES"
 
         echo "   --- Upload (cliente -> servidor) ---"
+        secao "iperf ${host}:${porta} upload"
         iperf3 -c "$host" -p "$porta" -t "$IPERF_TIME" \
-               --connect-timeout "$IPERF_CONNECT_TIMEOUT" 2>&1 | tee "$arq_ul" \
+               --connect-timeout "$IPERF_CONNECT_TIMEOUT" 2>&1 \
+               | tee -a "$COMPLETO_LOG" "$tmp_ul" \
             || echo -e "${C_ERRO}   [FALHA] no upload com ${host}:${porta}${C_RESET}"
         echo
 
-        local down up
-        down="$(parse_iperf "$arq_dl")"
-        up="$(parse_iperf "$arq_ul")"
-        IPERF_RESUMO+=("${host}|${porta}|${down}|${up}")
+        IPERF_RESUMO+=("${host}|${porta}|$(parse_iperf "$tmp_dl")|$(parse_iperf "$tmp_ul")")
+        rm -f "$tmp_dl" "$tmp_ul"
     done
 }
 
 # ----------------------------------------------------------------------
-# Resumo final (impresso na tela e gravado em resumo.txt)
+# Resumo (tela + resumo.txt + anexado ao completo.log)
 # ----------------------------------------------------------------------
 gera_resumo() {
     cabecalho "RESUMO"
-
     {
         echo "Resumo dos testes de rede - ${CARIMBO}"
         echo
@@ -201,24 +194,13 @@ gera_resumo() {
             echo
         fi
     } | tee "$RESUMO_TXT"
-}
 
-# ----------------------------------------------------------------------
-# Monta o completo.log concatenando tudo
-# ----------------------------------------------------------------------
-monta_completo() {
+    # Anexa o resumo ao final do completo.log
     {
-        echo "==== LOG COMPLETO - ${CARIMBO} ===="
         echo
-        for f in "${RESULT_DIR}"/ping_*.log "${RESULT_DIR}"/iperf_*.log; do
-            [[ -f "$f" ]] || continue
-            echo "########## $(basename "$f") ##########"
-            cat "$f"
-            echo
-        done
         echo "########## resumo.txt ##########"
-        [[ -f "$RESUMO_TXT" ]] && cat "$RESUMO_TXT"
-    } > "$COMPLETO_LOG"
+        cat "$RESUMO_TXT"
+    } >> "$COMPLETO_LOG"
 }
 
 # ----------------------------------------------------------------------
@@ -233,7 +215,9 @@ Sem opção   Roda ping + iperf3 (download e upload) em todos os servidores.
   -i        Somente teste de iperf3.
   -h        Mostra esta ajuda.
 
-Os resultados são salvos em: resultados-rede_AAAAMMDD_HHMMSS/
+Saída em: ${RESULT_DIR:-resultados-rede_AAAAMMDD_HHMMSS}/
+  resumo.txt    -> tabela-resumo legível
+  completo.log  -> saída bruta de todos os testes + resumo
 
 Servidores configurados:
 $(for s in "${SERVIDORES[@]}"; do echo "  - ${s%%:*} (porta iperf3: ${s##*:})"; done)
@@ -256,6 +240,7 @@ main() {
     esac
 
     mkdir -p "$RESULT_DIR"
+    echo "==== LOG COMPLETO - ${CARIMBO} ====" > "$COMPLETO_LOG"
 
     echo -e "${C_TITULO}Início dos testes: $(date '+%Y-%m-%d %H:%M:%S')${C_RESET}"
     echo -e "${C_INFO}Resultados serão salvos em: ${RESULT_DIR}/${C_RESET}"
@@ -264,7 +249,6 @@ main() {
     $rodar_iperf && testa_iperf
 
     gera_resumo
-    monta_completo
 
     cabecalho "TESTES CONCLUÍDOS"
     echo -e "${C_INFO}Arquivos gravados em: ${RESULT_DIR}/${C_RESET}"
