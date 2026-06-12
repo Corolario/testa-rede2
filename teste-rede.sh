@@ -36,7 +36,7 @@ SERVIDORES=(
 
 PING_COUNT=10       # pacotes ICMP por teste de ping
 IPERF_TIME=10       # duração de cada teste do iperf3 (segundos)
-IPERF_PARALELO=4    # número de conexões/streams TCP paralelas (flag -P do iperf3)
+IPERF_PARALELO=2    # número de conexões/streams TCP paralelas (flag -P do iperf3)
 IPERF_TENTATIVAS=5  # número máximo de tentativas em caso de falha
 IPERF_RETRY_DELAY=2 # segundos de espera entre tentativas
 
